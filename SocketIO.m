@@ -21,6 +21,7 @@
 #import "SocketIO.h"
 #import "SocketIOPacket.h"
 #import "SocketIOJSONSerialization.h"
+#import "NSString+URLEncode.h"
 
 #ifdef DEBUG
 #define DEBUG_LOGS 1
@@ -112,6 +113,8 @@ NSString* const SocketIOException = @"SocketIOException";
     [self connectToHost:host onPort:port withParams:params withNamespace:endpoint withConnectionTimeout:defaultConnectionTimeout];
 }
 
+
+
 - (void) connectToHost:(NSString *)host
                 onPort:(NSInteger)port
             withParams:(NSDictionary *)params
@@ -129,7 +132,7 @@ NSString* const SocketIOException = @"SocketIOException";
         // create a query parameters string
         NSMutableString *query = [[NSMutableString alloc] initWithString:@""];
         [params enumerateKeysAndObjectsUsingBlock: ^(id key, id value, BOOL *stop) {
-            [query appendFormat:@"&%@=%@", key, value];
+            [query appendFormat:@"&%@=%@", key,  [NSString encodeURL:value]];
         }];
         
         // do handshake via HTTP request
