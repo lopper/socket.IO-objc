@@ -663,6 +663,10 @@ typedef NSUInteger SocketIOTransportType;
 
 - (void) onError:(NSError *)error
 {
+    // Expectation Failed, transport is not supported. We can try then to open additional transports, otherwise report the error.
+    if(error && error.code == 417 && [self tryOpeningPendingTransport])
+        return;
+    
     if ([_delegate respondsToSelector:@selector(socketIO:onError:)]) {
         [_delegate socketIO:self onError:error];
     }
