@@ -22,6 +22,7 @@
 #import "SocketIOPacket.h"
 #import "SocketIOJSONSerialization.h"
 #import "NSString+URLEncode.h"
+#import "SocketIOTransport.h"
 
 #ifdef DEBUG
 #define DEBUG_LOGS 1
@@ -45,6 +46,11 @@ float const defaultConnectionTimeout = 10.0f;
 
 NSString* const SocketIOError     = @"SocketIOError";
 NSString* const SocketIOException = @"SocketIOException";
+enum {
+    SocketIOTransportWebSocket = 1,
+    SocketIOTransportXHRPooling = 2,
+};
+typedef NSUInteger SocketIOTransportType;
 
 # pragma mark -
 # pragma mark SocketIO's private interface
@@ -66,6 +72,10 @@ NSString* const SocketIOException = @"SocketIOException";
 - (NSString *) addAcknowledge:(SocketIOCallback)function;
 - (void) removeAcknowledgeForKey:(NSString *)key;
 - (NSMutableArray*) getMatchesFrom:(NSString*)data with:(NSString*)regex;
+
+- (NSObject<SocketIOTransport> *) createTransportFromPendingTransportList;
+- (BOOL) tryOpeningPendingTransport;
+- (NSObject<SocketIOTransport> *) createTransport:(SocketIOTransportType) type;
 
 @end
 
@@ -372,7 +382,8 @@ NSString* const SocketIOException = @"SocketIOException";
     }
     
     _isConnecting = NO;
-    
+    // don't try additional transports if we successfully connect
+    _pendingTransports = nil;
     if ([_delegate respondsToSelector:@selector(socketIODidConnect:)]) {
         [_delegate socketIODidConnect:self];
     }
@@ -609,8 +620,21 @@ NSString* const SocketIOException = @"SocketIOException";
     }
 }
 
+-(void) clearTransport
+{
+    if (_transport != nil) {
+        // clear websocket's delegate - otherwise crashes
+        _transport.delegate = nil;
+        [_transport close];
+    }
+}
 - (void) onDisconnect:(NSError *)error
 {
+    
+    // attempt to use fallback transport
+    if([self tryOpeningPendingTransport])
+        return;
+    
     DEBUGLOG(@"onDisconnect()");
     BOOL wasConnected = _isConnected;
     BOOL wasConnecting = _isConnecting;
@@ -628,11 +652,7 @@ NSString* const SocketIOException = @"SocketIOException";
     }
     
     // Disconnect the websocket, just in case
-    if (_transport != nil) {
-        // clear websocket's delegate - otherwise crashes
-        _transport.delegate = nil;
-        [_transport close];
-    }
+    [self clearTransport];
     
     if ((wasConnected || wasConnecting)) {
         if ([_delegate respondsToSelector:@selector(socketIODidDisconnect:disconnectedWithError:)]) {
@@ -744,28 +764,13 @@ NSString* const SocketIOException = @"SocketIOException";
         
         // get transports
         NSString *t = [data objectAtIndex:3];
-        NSArray *transports = [t componentsSeparatedByString:@","];
-        DEBUGLOG(@"transports: %@", transports);
+        _pendingTransports = [[t componentsSeparatedByString:@","] mutableCopy];
+        DEBUGLOG(@"transports: %@", _pendingTransports);
         
-        static Class webSocketTransportClass;
-        static Class xhrTransportClass;
+
         
-        if (webSocketTransportClass == nil) {
-            webSocketTransportClass = NSClassFromString(@"SocketIOTransportWebsocket");
-        }
-        if (xhrTransportClass == nil) {
-            xhrTransportClass = NSClassFromString(@"SocketIOTransportXHR");
-        }
-        
-        if (webSocketTransportClass != nil && [transports indexOfObject:@"websocket"] != NSNotFound) {
-            DEBUGLOG(@"websocket supported -> using it now");
-            _transport = [[webSocketTransportClass alloc] initWithDelegate:self];
-        }
-        else if (xhrTransportClass != nil && [transports indexOfObject:@"xhr-polling"] != NSNotFound) {
-            DEBUGLOG(@"xhr polling supported -> using it now");
-            _transport = [[xhrTransportClass alloc] initWithDelegate:self];
-        }
-        else {
+        _transport = [self createTransportFromPendingTransportList];
+        if(_transport == nil){
             DEBUGLOG(@"no transport found that is supported :( -> fail");
             connectionFailed = true;
             error = [NSError errorWithDomain:SocketIOError
@@ -794,6 +799,80 @@ NSString* const SocketIOException = @"SocketIOException";
     }
     
     [_transport open];
+}
+- (BOOL) tryOpeningPendingTransport
+{
+    if(_pendingTransports != nil)
+    {
+        [self clearTransport];
+        _transport = [self createTransportFromPendingTransportList];
+        if(_transport != nil)
+        {
+            [_transport open];
+            return YES;
+        }
+    }
+    
+    return NO;
+}
+- (NSObject<SocketIOTransport>* ) createTransportFromPendingTransportList
+{
+    if(_pendingTransports == nil)
+        return nil;
+    
+    NSObject <SocketIOTransport> *transportObj = nil;
+    while([_pendingTransports count] > 0)
+    {
+        NSString * transport = [_pendingTransports firstObject];
+        [_pendingTransports removeObjectAtIndex:0];
+        if(transport != nil)
+        {
+            if([transport isEqualToString:@"websocket"])
+            {
+                transportObj = [self createTransport:SocketIOTransportWebSocket];
+            }
+            else if([transport isEqualToString:@"xhr-polling"])
+            {
+                transportObj = [self createTransport:SocketIOTransportXHRPooling];
+            }
+            
+        }
+        
+        if(transportObj != nil)
+        {
+            if([_pendingTransports count] == 0)
+                _pendingTransports = nil;
+            
+            return transportObj;
+        }
+    }
+    
+    return nil;
+}
+- (NSObject<SocketIOTransport>* )  createTransport:(SocketIOTransportType) type
+{
+    if(type == SocketIOTransportWebSocket)
+    {
+        static Class webSocketTransportClass;
+        if(webSocketTransportClass == nil)
+            webSocketTransportClass = NSClassFromString(@"SocketIOTransportWebsocket");
+        if(webSocketTransportClass != nil)
+        {
+            return  [[webSocketTransportClass alloc] initWithDelegate:self];
+        }
+    }
+    else if(type == SocketIOTransportXHRPooling)
+    {
+        static Class xhrTransportClass;
+        if(xhrTransportClass == nil)
+            xhrTransportClass = NSClassFromString(@"SocketIOTransportXHR");
+        if(xhrTransportClass != nil)
+        {
+            return  [[xhrTransportClass alloc] initWithDelegate:self];
+        }
+    }
+    
+    return nil;
 }
 
 #if DEBUG_CERTIFICATE

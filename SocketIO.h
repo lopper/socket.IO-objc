@@ -78,6 +78,7 @@ typedef enum {
     dispatch_source_t _timeout;
     
     NSMutableArray *_queue;
+    NSMutableArray *_pendingTransports;
     
     // acknowledge
     NSMutableDictionary *_acks;
